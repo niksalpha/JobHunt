@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 from pypdf import PdfReader
-from python_jobspy import scrape_jobs  # 🕵️‍♂️ Real-time network scraping engine
+from jobspy import scrape_jobs  # 
 
 # --- CUSTOM RESUME TEXT EXTRACTOR ---
 def extract_text_from_pdf(uploaded_file):
