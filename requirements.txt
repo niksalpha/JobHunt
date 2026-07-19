@@ -4,3 +4,4 @@ pypdf
 google-genai
 pyyaml
 pydantic
+python-jobspy
