@@ -75,7 +75,6 @@ with st.sidebar:
     st.header("🌐 Platform Target Selection")
     choose_linkedin = st.checkbox("LinkedIn", value=True)
     choose_indeed = st.checkbox("Indeed", value=True)
-    choose_ziprecruiter = st.checkbox("ZipRecruiter (Cloudflare bypass enabled)", value=False)
 
     st.header("📄 Candidate Profile Source")
     uploaded_resume = st.file_uploader("Upload Master Resume (PDF)", type=["pdf"])
