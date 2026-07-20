@@ -108,7 +108,7 @@ if st.button("🚀 Deploy Job Hunt Triage Loop"):
     platforms = []
     if choose_linkedin: platforms.append("linkedin")
     if choose_indeed: platforms.append("indeed")
-    if choose_ziprecruiter: platforms.append("zip_recruiter")
+   # if choose_ziprecruiter: platforms.append("zip_recruiter")
     
     if not platforms:
         st.error("Please select at least one search platform in the sidebar options.")
