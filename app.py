@@ -360,7 +360,7 @@ if "high_fit_matches" in st.session_state:
                                 except Exception as e:
                                     if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota" in str(e):
                                         st.error(
-                                            "🚨 Gemini API Rate Limit / Quota reached! Please wait ~30-60 seconds and click the button again.")
+                                            "🚨 Gemini API Rate Limit / Quota reached! Please wait for sometime and click the button again or use a different Key if available.")
                                     else:
                                         st.error(f"⚠️ API Error: {e}")
 
