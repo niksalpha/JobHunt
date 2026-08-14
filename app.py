@@ -8,7 +8,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader
 from fpdf import FPDF
-from jobspy import scrape_jobs  # 🕵️‍♂️ Real-time network scraping engine
+from jobspy import scrape_jobs  # Real-time network scraping engine
 
 
 # --- CUSTOM RESUME TEXT EXTRACTOR ---
@@ -105,6 +105,7 @@ def generate_tailored_resume_and_ats_score(candidate_profile, job_title, job_com
 def create_pdf_from_text(text_content):
     """
     Converts resume text into a clean PDF byte stream.
+    Handles blank lines and spacing safely to prevent FPDFException.
     """
     pdf = FPDF()
     pdf.add_page()
@@ -116,17 +117,23 @@ def create_pdf_from_text(text_content):
 
     for line in clean_text.split("\n"):
         line = line.strip()
+
+        # Handle blank lines safely by adding vertical spacing instead of multi_cell
+        if not line:
+            pdf.ln(3)
+            continue
+
         if line.startswith("# "):
             pdf.set_font("Arial", 'B', 14)
-            pdf.cell(0, 8, line.replace("# ", ""), ln=True)
+            pdf.multi_cell(0, 8, line.replace("# ", ""))
             pdf.set_font("Arial", size=10)
         elif line.startswith("## "):
             pdf.set_font("Arial", 'B', 12)
-            pdf.cell(0, 6, line.replace("## ", ""), ln=True)
+            pdf.multi_cell(0, 6, line.replace("## ", ""))
             pdf.set_font("Arial", size=10)
         elif line.startswith("### "):
             pdf.set_font("Arial", 'B', 11)
-            pdf.cell(0, 6, line.replace("### ", ""), ln=True)
+            pdf.multi_cell(0, 6, line.replace("### ", ""))
             pdf.set_font("Arial", size=10)
         else:
             pdf.multi_cell(0, 5, line)
