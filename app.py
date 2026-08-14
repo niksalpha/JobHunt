@@ -8,7 +8,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader
 from fpdf import FPDF
-from jobspy import scrape_jobs  # Real-time network scraping engine
+from jobspy import scrape_jobs  # 🕵️‍♂️ Real-time network scraping engine
 
 
 # --- CUSTOM RESUME TEXT EXTRACTOR ---
@@ -347,15 +347,22 @@ if "high_fit_matches" in st.session_state:
                             st.error("API Key required.")
                         else:
                             with st.spinner("Calculating ATS Score & generating tailored resume..."):
-                                res_data = generate_tailored_resume_and_ats_score(
-                                    candidate_profile=st.session_state.dynamic_profile,
-                                    job_title=title,
-                                    job_company=company,
-                                    job_description=description,
-                                    ats_keywords=ats_keywords,
-                                    api_key=user_api_key
-                                )
-                                st.session_state[f"ats_res_{i}"] = res_data
+                                try:
+                                    res_data = generate_tailored_resume_and_ats_score(
+                                        candidate_profile=st.session_state.dynamic_profile,
+                                        job_title=title,
+                                        job_company=company,
+                                        job_description=description,
+                                        ats_keywords=ats_keywords,
+                                        api_key=user_api_key
+                                    )
+                                    st.session_state[f"ats_res_{i}"] = res_data
+                                except Exception as e:
+                                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota" in str(e):
+                                        st.error(
+                                            "🚨 Gemini API Rate Limit / Quota reached! Please wait ~30-60 seconds and click the button again.")
+                                    else:
+                                        st.error(f"⚠️ API Error: {e}")
 
                     # Display ATS Score and Download PDF
                     if f"ats_res_{i}" in st.session_state:
