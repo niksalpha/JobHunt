@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 from fpdf import FPDF
 from google import genai
 from google.genai import types
+from google.genai.errors import ClientError
 from jobspy import scrape_jobs
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -26,7 +27,7 @@ def extract_text_from_pdf(uploaded_file: Any) -> str:
 
 
 # --- LLM PROFILE GENERATOR ---
-def convert_resume_to_profile(raw_text: str, api_key: str) -> Dict[str, Any]:
+def convert_resume_to_profile(raw_text: str, api_key: str) -> Dict[str, Any] | None:
     client = genai.Client(api_key=api_key)
     system_instruction = (
         "Extract unstructured data from a candidate's resume and format it into"
@@ -47,16 +48,26 @@ def convert_resume_to_profile(raw_text: str, api_key: str) -> Dict[str, Any]:
     }}
     Return ONLY valid raw JSON matching this format. No markdown blocks.
     """
-    gen_response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            temperature=0.1,
-        ),
-    )
-    return json.loads(str(gen_response.text)) if gen_response.text else {}
+    try:
+        gen_response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        return json.loads(str(gen_response.text)) if gen_response.text else {}
+    except ClientError as e:
+        if e.code == 429 or "RESOURCE_EXHAUSTED" in str(e):
+            st.error("⏳ Gemini Free Tier rate limit reached. Please wait a few seconds before trying again.")
+        else:
+            st.error(f"⚠️ API Error ({e.code}): Unable to process resume.")
+        return None
+    except Exception as e:
+        st.error(f"⚠️ Unexpected error parsing response: {str(e)}")
+        return None
 
 
 # --- ATS TAILORED RESUME & SCORE SCHEMA ---
@@ -80,15 +91,26 @@ class TailoredResumeResponse(BaseModel):
 
 
 def generate_tailored_resume_and_ats_score(
-    candidate_profile: Dict[str, Any],
-    job_title: str,
-    job_company: str,
-    job_description: str,
-    ats_keywords: List[str],
-    api_key: str,
+        candidate_profile: Dict[str, Any],
+        job_title: str,
+        job_company: str,
+        job_description: str,
+        ats_keywords: List[str],
+        api_key: str,
+        aggressive_mode: bool = False,
 ) -> Dict[str, Any]:
-    """Generates a tailored resume alongside an ATS optimization score using Gemini structured outputs."""
+    """Generates or regenerates a tailored resume alongside an ATS optimization score using Gemini structured outputs."""
     client = genai.Client(api_key=api_key)
+
+    optimization_instruction = (
+        "Focus on maximum natural alignment and clean keyword integration."
+    )
+    if aggressive_mode:
+        optimization_instruction = (
+            "HIGH OPTIMIZATION MODE: Aggressively align experience bullets and skills section "
+            "with ALL target ATS keywords. Rephrase bullet points to strictly highlight high-impact "
+            "achievements matching job description requirements, targeting an ATS score of 85+."
+        )
 
     prompt = f"""
     You are an expert ATS Resume Optimization Specialist.
@@ -102,6 +124,9 @@ def generate_tailored_resume_and_ats_score(
     Description: {job_description}
     Target ATS Keywords to Emphasize: {", ".join(ats_keywords)}
 
+    OPTIMIZATION GOAL:
+    {optimization_instruction}
+
     INSTRUCTIONS:
     1. Rewrite the candidate's resume tailored specifically to this target job description.
     2. Format the resume using standard Markdown:
@@ -112,21 +137,28 @@ def generate_tailored_resume_and_ats_score(
        - `### Job Title | Company | Location | Dates` for role headers
        - Bullet points using `*` for achievements
        - `## SKILLS` (categorized cleanly)
-    3. Naturally incorporate the target ATS keywords into experience bullet points without keyword stuffing.
-    4. Evaluate the tailored resume against the job description and assign an ATS Match Score (0-100%).
-    5. Provide a brief 2-sentence score breakdown explaining keyword match coverage.
+    3. Incorporate target ATS keywords smoothly across experience points and skills without artificial stuffing.
+    4. Evaluate the tailored resume against the job description and assign an updated ATS Match Score (0-100%).
+    5. Provide a brief 2-sentence score breakdown detailing match improvements or keyword coverage.
     """
 
-    gen_response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=TailoredResumeResponse,
-            temperature=0.2,
-        ),
-    )
-    return json.loads(str(gen_response.text)) if gen_response.text else {}
+    try:
+        gen_response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=TailoredResumeResponse,
+                temperature=0.3 if aggressive_mode else 0.2,
+            ),
+        )
+        return json.loads(str(gen_response.text)) if gen_response.text else {}
+    except ClientError as e:
+        if e.code == 429 or "RESOURCE_EXHAUSTED" in str(e):
+            st.error("⏳ Gemini Free Tier rate limit reached (20 requests/day). Please try again in about 30 seconds.")
+        else:
+            st.error(f"⚠️ API Error ({e.code}): Failed to generate tailored resume.")
+        return {}
 
 
 # --- SANITIZE UNICODE FOR FPDF ---
@@ -189,15 +221,13 @@ def create_pdf_from_text(text_content: str) -> BytesIO:
             i += 1
             continue
 
-        # Main Candidate Name Header (#)
         if line_item.startswith("# "):
             name_text = line_item.replace("# ", "").strip().upper()
             pdf.set_font("Helvetica", "B", 18)
-            pdf.set_text_color(24, 43, 73)  # Professional Navy Blue Accent
+            pdf.set_text_color(24, 43, 73)
             pdf.cell(usable_w, 9, name_text, ln=True, align="C")
             pdf.ln(1)
 
-        # Section Headers (## EXPERIENCE, ## SKILLS, ## SUMMARY)
         elif line_item.startswith("## "):
             section_title = line_item.replace("## ", "").strip().upper()
             pdf.ln(3)
@@ -205,15 +235,13 @@ def create_pdf_from_text(text_content: str) -> BytesIO:
             pdf.set_text_color(24, 43, 73)
             pdf.cell(usable_w, 6, section_title, ln=True)
 
-            # Section Underline Divider
             pdf.set_draw_color(200, 205, 215)
             pdf.set_line_width(0.4)
             current_y = pdf.get_y()
             pdf.line(pdf.l_margin, current_y, pdf.w - pdf.r_margin, current_y)
             pdf.ln(3)
-            pdf.set_text_color(40, 40, 40)  # Reset body text color
+            pdf.set_text_color(40, 40, 40)
 
-        # Sub-Headers / Job Titles / Companies (###)
         elif line_item.startswith("### "):
             subtitle = line_item.replace("### ", "").strip()
             pdf.ln(1.5)
@@ -222,20 +250,17 @@ def create_pdf_from_text(text_content: str) -> BytesIO:
             pdf.multi_cell(usable_w, 5, subtitle)
             pdf.ln(1)
 
-        # Bullet Points (* or -)
         elif line_item.startswith("* ") or line_item.startswith("- "):
             bullet_text = line_item[2:].strip()
             pdf.set_font("Helvetica", "", 10)
             pdf.set_text_color(50, 50, 50)
 
-            # Indented bullet point formatting
             pdf.set_x(pdf.l_margin)
-            pdf.cell(5, 5, "-", ln=False)  # Clean bullet point hyphen
+            pdf.cell(5, 5, "-", ln=False)
             pdf.set_x(pdf.l_margin + 5)
             pdf.multi_cell(usable_w - 5, 5, bullet_text)
             pdf.ln(0.5)
 
-        # Standard body text & Contact Details
         else:
             pdf.set_font("Helvetica", "", 10)
             pdf.set_text_color(50, 50, 50)
@@ -244,7 +269,6 @@ def create_pdf_from_text(text_content: str) -> BytesIO:
             if "**" in line_item:
                 pdf.draw_bold_markdown_line(line_item, default_font_size=10)
             else:
-                # Check if centered contact info line (under main title)
                 if i < 3 and "@" in line_item:
                     pdf.set_font("Helvetica", "", 9.5)
                     pdf.set_text_color(100, 100, 100)
@@ -256,7 +280,6 @@ def create_pdf_from_text(text_content: str) -> BytesIO:
 
         i += 1
 
-    # Safe version-agnostic PDF byte export
     raw_output = pdf.output()
     if isinstance(raw_output, (bytes, bytearray)):
         pdf_bytes = bytes(raw_output)
@@ -283,12 +306,11 @@ st.title("🎯 Autonomous Job Triage Hub")
 st.write(
     str(
         "Upload your resume, set your targets, and let the agent hunt, "
-        "score, evaluate, and generate tailored ATS resumes instantly. Don't "
-        "worry, we store no personal information."
+        "score, evaluate, and generate tailored ATS resumes instantly."
     )
 )
 
-# --- SIDEBAR: USER AUTHENTICATION & INPUTS ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("🔑 Authentication & Control")
     user_api_key = st.text_input(
@@ -305,21 +327,16 @@ with st.sidebar:
     results_wanted_input = st.text_input(
         label="Max Job Results to Fetch",
         value="5",
-        help=(
-            "Specify how many job postings to fetch per platform (1-50). Lower "
-            "numbers help stay within Gemini free-tier rate limits."
-        ),
+        help="Specify how many job postings to fetch per platform (1-50).",
     )
 
     num_results = 5
     if results_wanted_input.strip():
         if not results_wanted_input.strip().isdigit():
-            st.warning("⚠️ Please enter a positive integer for Max Job Results (defaulting to 5).")
+            st.warning("⚠️ Please enter a positive integer (defaulting to 5).")
         else:
             parsed_val = int(results_wanted_input.strip())
-            if parsed_val <= 0:
-                st.warning("⚠️ Value must be greater than 0 (defaulting to 5).")
-            else:
+            if parsed_val > 0:
                 num_results = parsed_val
 
     is_remote = st.checkbox(label="Strictly Remote Positions Only", value=False)
@@ -355,8 +372,8 @@ div.stButton > button:first-child:hover {
     unsafe_allow_html=True,
 )
 
-# --- Button ---
-if st.button("🚀 Deploy Job Hunt - Hit me!!"):
+# --- DEPLOY BUTTON ---
+if st.button("🚀 Deploy Job Hunt!"):
     st.toast("Launching the Job Hunt Engine....", icon="🚀")
     if not user_api_key:
         st.error("Please provide a valid Gemini API Key to run the triage matrix.")
@@ -365,25 +382,29 @@ if st.button("🚀 Deploy Job Hunt - Hit me!!"):
         st.error("Please upload a PDF resume to initialize target mapping.")
         st.stop()
 
-    # Phase 1: Dynamic Profile Creation from Uploaded PDF
     status_container = st.status(label="🧠 Lemme analyze and parse incoming resume, hang on!...")
-    with status_container:
-        raw_resume_text = extract_text_from_pdf(uploaded_resume)
-        dynamic_profile = convert_resume_to_profile(raw_resume_text, user_api_key)
 
-        role_list = [r.strip() for r in target_roles.split(",") if r.strip()]
+    raw_resume_text = extract_text_from_pdf(uploaded_resume)
+    dynamic_profile = convert_resume_to_profile(raw_resume_text, user_api_key)
 
-        dynamic_profile["target_preferences"] = {
-            "roles": role_list,
-            "location": target_location,
-            "min_fit_score": min_score,
-        }
-        st.session_state.dynamic_profile = dynamic_profile
+    if dynamic_profile is None:
         status_container.update(
-            label="✅ Live Resume Profile Compiled In-Memory!", state="complete"
+            label="❌ Failed to analyze resume.", state="error"
         )
+        st.stop()
 
-    # Phase 2: Real-time Live Network Scraper Pull via JobSpy
+    role_list = [r.strip() for r in target_roles.split(",") if r.strip()]
+
+    dynamic_profile["target_preferences"] = {
+        "roles": role_list,
+        "location": target_location,
+        "min_fit_score": min_score,
+    }
+    st.session_state.dynamic_profile = dynamic_profile
+    status_container.update(
+        label="✅ Live Resume Profile Compiled In-Memory!", state="complete"
+    )
+
     platforms = []
     if choose_linkedin:
         platforms.append("linkedin")
@@ -429,13 +450,9 @@ if st.button("🚀 Deploy Job Hunt - Hit me!!"):
             st.stop()
 
     if total_found == 0 or jobs_df.empty:
-        st.info(
-            "The live scraper returned 0 jobs for those specific keyword "
-            "parameters. Try adjusting your location or role filters."
-        )
+        st.info("The live scraper returned 0 jobs. Try adjusting location or role filters.")
         st.stop()
 
-    # Phase 3: Live LLM Match Evaluation
     st.subheader("📊 Live Match Evaluation Stream")
     eval_client = genai.Client(api_key=user_api_key)
     high_fit_matches = []
@@ -481,15 +498,18 @@ if st.button("🚀 Deploy Job Hunt - Hit me!!"):
                     st.warning(f"📉 Low Fit ({match_score}/10): {job_title} at {job_company}")
 
                 time.sleep(4)
-            except Exception as e:
-                if "429" in str(e) or "Quota" in str(e):
-                    st.error("🚨 Gemini Free Tier quota hit! Gracefully displaying current matches...")
+            except ClientError as e:
+                if e.code == 429 or "RESOURCE_EXHAUSTED" in str(e):
+                    st.error("⏳ Gemini Free Tier rate limit reached. Displaying currently evaluated matches...")
                     break
+                else:
+                    st.error(f"⚠️ API Error ({e.code}): Couldn't process {job_title}.")
+            except Exception as e:
                 st.error(f"⚠️ Error processing row: {e}")
 
     st.session_state.high_fit_matches = high_fit_matches
 
-# --- PHASE 4: DISPLAY DIGITAL DASHBOARD RESULTS WITH ATS SCORE & PDF EXPORT ---
+# --- DASHBOARD RESULTS DISPLAY WITH RE-RUN / REGENERATE OPTION ---
 if "high_fit_matches" in st.session_state:
     st.markdown("---")
     st.subheader("🎯 Custom Matched Opportunities Matrix")
@@ -522,22 +542,25 @@ if "high_fit_matches" in st.session_state:
                     target_url = str(raw_url) if pd.notna(raw_url) else "https://google.com"
                     st.markdown(f"[🔗 Apply to Position]({target_url})")
 
-                btn_key = f"btn_gen_{idx}_{hash(title)}"
+                btn_gen_key = f"btn_gen_{idx}_{hash(title)}"
+                btn_regen_key = f"btn_regen_{idx}_{hash(title)}"
                 res_key = f"ats_res_{idx}_{hash(title)}"
 
-                # --- CUSTOM RESUME & ATS SCORE EXPANDER ---
-                # Sets expanded to True once results are ready so user doesn't have to manually click
                 is_expanded = res_key in st.session_state
                 with st.expander(
-                    f"📝 ATS Score & Tailored Resume for {title}",
-                    expanded=is_expanded,
+                        f"📝 ATS Score & Tailored Resume for {title}",
+                        expanded=is_expanded,
                 ):
-                    if st.button("Generate ATS Score & Tailored Resume", key=btn_key):
-                        if not user_api_key:
-                            st.error("API Key required.")
-                        else:
-                            with st.spinner(text="Calculating ATS Score & generating tailored resume..."):
-                                try:
+                    # Check if the resume has already been generated
+                    has_generated = res_key in st.session_state
+
+                    # Action 1: Initial Generation (Shown if NOT yet generated)
+                    if not has_generated:
+                        if st.button("Generate ATS Score & Resume", key=btn_gen_key):
+                            if not user_api_key:
+                                st.error("API Key required.")
+                            else:
+                                with st.spinner("Calculating ATS Score & generating tailored resume."):
                                     res_data = generate_tailored_resume_and_ats_score(
                                         candidate_profile=st.session_state.dynamic_profile,
                                         job_title=title,
@@ -545,61 +568,55 @@ if "high_fit_matches" in st.session_state:
                                         job_description=description,
                                         ats_keywords=ats_keywords,
                                         api_key=user_api_key,
+                                        aggressive_mode=False,
                                     )
-                                    st.session_state[res_key] = res_data
+                                    if res_data:
+                                        st.session_state[res_key] = res_data
+                                        st.toast(f"🎉 Tailored Resume ready for {title}!", icon="✅")
+                                        st.rerun()
 
-                                    # Notify user via Streamlit Toast & Web Audio chime
-                                    st.toast(
-                                        f"🎉 Tailored Resume ready for {title}!",
-                                        icon="✅",
-                                    )
-                                    components.html(
-                                        """
-                                        <script>
-                                            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                                            const osc = audioCtx.createOscillator();
-                                            const gain = audioCtx.createGain();
-                                            osc.type = 'sine';
-                                            osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5
-                                            osc.frequency.setValueAtTime(880, audioCtx.currentTime + 0.15); // A5
-                                            gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
-                                            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.5);
-                                            osc.connect(gain);
-                                            gain.connect(audioCtx.destination);
-                                            osc.start();
-                                            osc.stop(audioCtx.currentTime + 0.5);
-                                        </script>
-                                        """,
-                                        height=0,
-                                    )
-                                    st.rerun()
-
-                                except Exception as e:
-                                    if (
-                                        "429" in str(e)
-                                        or "RESOURCE_EXHAUSTED" in str(e)
-                                        or "Quota" in str(e)
-                                    ):
-                                        st.error(
-                                            "🚨 Gemini API Rate Limit / Quota reached! Please wait "
-                                            "for sometime and click the button again or use a "
-                                            "different Key if available."
-                                        )
-                                    else:
-                                        st.error(f"⚠️ API Error: {e}")
-
-                    # Display ATS Score, Markdown Copy Option, and Download PDF automatically once loaded
-                    if res_key in st.session_state:
+                    # DISPLAY LOADED DATA & RE-EVALUATE OPTION (Only shown AFTER generation)
+                    if has_generated:
                         res_data = st.session_state[res_key]
 
-                        st.markdown("---")
-                        metric_col, text_col = st.columns([1, 3])
+                        # Top Bar: ATS Score + Re-evaluate / Boost Action
+                        metric_col, text_col, regen_col = st.columns([1.5, 3, 2])
 
                         with metric_col:
-                            st.metric(label="📈 ATS Match Score", value=f"{res_data['ats_score']}%")
+                            score_val = res_data['ats_score']
+                            delta_label = "High Match" if score_val >= 80 else "Needs Keyword Boost"
+                            st.metric(
+                                label="📈 ATS Match Score",
+                                value=f"{score_val}%",
+                                delta=delta_label,
+                                delta_color="normal" if score_val >= 80 else "inverse",
+                            )
 
                         with text_col:
                             st.markdown(f"**ATS Optimization Breakdown:** {res_data['score_breakdown']}")
+
+                        # Action 2: Re-evaluate Button (Appears ONLY when ATS score exists)
+                        with regen_col:
+                            if st.button("Re-evaluate & Boost Score", key=btn_regen_key):
+                                if not user_api_key:
+                                    st.error("API Key required.")
+                                else:
+                                    with st.spinner("🔄 Aggressively optimizing keywords for higher ATS score..."):
+                                        res_data = generate_tailored_resume_and_ats_score(
+                                            candidate_profile=st.session_state.dynamic_profile,
+                                            job_title=title,
+                                            job_company=company,
+                                            job_description=description,
+                                            ats_keywords=ats_keywords,
+                                            api_key=user_api_key,
+                                            aggressive_mode=True,
+                                        )
+                                        if res_data:
+                                            st.session_state[res_key] = res_data
+                                            st.toast(f"🚀 ATS Score Boosted to {res_data['ats_score']}%!", icon="✅")
+                                            st.rerun()
+
+                        st.markdown("---")
 
                         resume_text = res_data["tailored_resume_text"]
                         st.markdown("#### Preview Tailored Resume")
@@ -610,12 +627,10 @@ if "high_fit_matches" in st.session_state:
                             key=f"txt_{res_key}",
                         )
 
-                        # --- COPY MARKDOWN & DOWNLOAD OPTIONS ---
                         st.markdown("#### 📤 Export Options")
                         dl_col, copy_col = st.columns([1, 1])
 
                         with dl_col:
-                            # Generate PDF Stream for Download safely
                             pdf_file = create_pdf_from_text(resume_text)
                             clean_filename = (
                                 f"Tailored_Resume_{company.replace(' ', '_')}_{title.replace(' ', '_')}.pdf"
@@ -630,7 +645,6 @@ if "high_fit_matches" in st.session_state:
                             )
 
                         with copy_col:
-                            # Custom HTML/JS Copy Button
                             escaped_markdown = json.dumps(resume_text)
                             copy_button_html = f"""
                             <button id="copyBtn_{idx}" style="
