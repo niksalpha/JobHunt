@@ -1,5 +1,4 @@
 import json
-import re
 import time
 from io import BytesIO
 from fpdf import FPDF
@@ -76,9 +75,8 @@ class TailoredResumeResponse(BaseModel):
     tailored_resume_text: str = Field(
         ...,
         description=(
-            "The complete tailored resume formatted cleanly in Markdown"
-            " (Use # for Name, ## for Sections like EXPERIENCE, SKILLS, ### for"
-            " Job Titles/Company, and * for bullet points)."
+            "The complete tailored resume formatted cleanly with clear section"
+            " headings."
         ),
     )
 
@@ -108,17 +106,9 @@ def generate_tailored_resume_and_ats_score(
 
     INSTRUCTIONS:
     1. Rewrite the candidate's resume tailored specifically to this target job description.
-    2. Format the resume using standard Markdown:
-       - `# CANDIDATE NAME` at top
-       - Contact info line immediately under name
-       - `## SUMMARY`
-       - `## EXPERIENCE`
-       - `### Job Title | Company | Location | Dates` for role headers
-       - Bullet points using `*` for achievements
-       - `## SKILLS` (categorized cleanly)
-    3. Naturally incorporate the target ATS keywords into experience bullet points without keyword stuffing.
-    4. Evaluate the tailored resume against the job description and assign an ATS Match Score (0-100%).
-    5. Provide a brief 2-sentence score breakdown explaining keyword match coverage.
+    2. Naturally incorporate the target ATS keywords into experience bullet points without keyword stuffing.
+    3. Evaluate the tailored resume against the job description and assign an ATS Match Score (0-100%).
+    4. Provide a brief 2-sentence score breakdown explaining keyword match coverage.
     """
 
     response = client.models.generate_content(
@@ -133,136 +123,72 @@ def generate_tailored_resume_and_ats_score(
     return json.loads(response.text)
 
 
-# --- SANITIZE UNICODE FOR FPDF ---
+# --- SANITIZE UNICODE FOR FPDF (Prevents Character Encoding Crashes) ---
 def sanitize_text_for_pdf(text):
-    """Replaces non-latin1 characters with safe ASCII equivalents."""
+    """Replaces non-latin1 characters (like fancy quotes, bullets, emojis) with safe ASCII equivalents."""
     replacements = {
         "\u2013": "-",
-        "\u2014": "-",
+        "\u2014": "-",  # En-dash, Em-dash
         "\u2018": "'",
-        "\u2019": "'",
+        "\u2019": "'",  # Smart single quotes
         "\u201c": '"',
-        "\u201d": '"',
-        "\u2022": "*",
-        "\u2026": "...",
+        "\u201d": '"',  # Smart double quotes
+        "\u2022": "*",  # Bullet point
+        "\u2026": "...",  # Ellipsis
     }
     for orig, repl in replacements.items():
         text = text.replace(orig, repl)
+
+    # Fallback: Encode to latin-1 and ignore remaining incompatible characters
     return text.encode("latin-1", errors="ignore").decode("latin-1")
 
 
-# --- MODERN HIGH-QUALITY ATS PDF ENGINE ---
-class ATS_Resume_PDF(FPDF):
-
-    def header(self):
-        pass
-
-    def footer(self):
-        pass
-
-    def draw_bold_markdown_line(self, line, usable_w, default_font_size=10):
-        """Parses line for **bold text** and renders inline styled segments."""
-        parts = re.split(r"(\*\*.*?\*\*)", line)
-        for part in parts:
-            if part.startswith("**") and part.endswith("**"):
-                clean_part = part[2:-2]
-                self.set_font("Helvetica", "B", default_font_size)
-                self.write(5, clean_part)
-            else:
-                self.set_font("Helvetica", "", default_font_size)
-                self.write(5, part)
-        self.ln(5)
-
-
+# --- PDF GENERATOR ENGINE (SAFE FPDF OUTPUT HANDLER) ---
 def create_pdf_from_text(text_content):
-    """Converts Markdown formatted resume text into a highly styled, ATS-compliant PDF document."""
-    pdf = ATS_Resume_PDF(orientation="P", unit="mm", format="A4")
-    pdf.set_margins(left=15, top=15, right=15)
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
+    """Converts resume text into a clean PDF byte stream.
 
+  Safely converts string/bytearray outputs across FPDF and FPDF2 versions.
+  """
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_font("Arial", size=10)
+
+    # Calculate exact printable width: Total Width - Left Margin - Right Margin
     usable_w = pdf.w - pdf.l_margin - pdf.r_margin
+
+    # Clean Unicode special characters
     clean_text = sanitize_text_for_pdf(text_content)
 
-    lines = clean_text.split("\n")
-    i = 0
+    for line in clean_text.split("\n"):
+        line = line.strip()
 
-    while i < len(lines):
-        line = lines[i].strip()
+        # Always reset X position to left margin before drawing line
+        pdf.set_x(pdf.l_margin)
 
+        # Handle blank lines safely by adding vertical spacing
         if not line:
-            i += 1
+            pdf.ln(3)
             continue
 
-        # Main Candidate Name Header (#)
         if line.startswith("# "):
-            name_text = line.replace("# ", "").strip().upper()
-            pdf.set_font("Helvetica", "B", 18)
-            pdf.set_text_color(24, 43, 73)  # Professional Navy Blue Accent
-            pdf.cell(usable_w, 9, name_text, ln=True, align="C")
-            pdf.ln(1)
-
-        # Section Headers (## EXPERIENCE, ## SKILLS, ## SUMMARY)
+            pdf.set_font("Arial", "B", 14)
+            pdf.multi_cell(usable_w, 8, line.replace("# ", ""))
+            pdf.set_font("Arial", size=10)
         elif line.startswith("## "):
-            section_title = line.replace("## ", "").strip().upper()
-            pdf.ln(3)
-            pdf.set_font("Helvetica", "B", 12)
-            pdf.set_text_color(24, 43, 73)
-            pdf.cell(usable_w, 6, section_title, ln=True)
-
-            # Section Underline Divider
-            pdf.set_draw_color(200, 205, 215)
-            pdf.set_linewidth(0.4)
-            current_y = pdf.get_y()
-            pdf.line(pdf.l_margin, current_y, pdf.w - pdf.r_margin, current_y)
-            pdf.ln(3)
-            pdf.set_text_color(40, 40, 40)  # Reset body text color
-
-        # Sub-Headers / Job Titles / Companies (###)
+            pdf.set_font("Arial", "B", 12)
+            pdf.multi_cell(usable_w, 6, line.replace("## ", ""))
+            pdf.set_font("Arial", size=10)
         elif line.startswith("### "):
-            subtitle = line.replace("### ", "").strip()
-            pdf.ln(1.5)
-            pdf.set_font("Helvetica", "B", 10.5)
-            pdf.set_text_color(30, 30, 30)
-            pdf.multi_cell(usable_w, 5, subtitle)
-            pdf.ln(1)
-
-        # Bullet Points (* or -)
-        elif line.startswith("* ") or line.startswith("- "):
-            bullet_text = line[2:].strip()
-            pdf.set_font("Helvetica", "", 10)
-            pdf.set_text_color(50, 50, 50)
-
-            # Indented bullet point formatting
-            pdf.set_x(pdf.l_margin)
-            pdf.cell(5, 5, chr(149), ln=False)  # Clean bullet point dot
-            pdf.set_x(pdf.l_margin + 5)
-            pdf.multi_cell(usable_w - 5, 5, bullet_text)
-            pdf.ln(0.5)
-
-        # Standard body text & Contact Details
+            pdf.set_font("Arial", "B", 11)
+            pdf.multi_cell(usable_w, 6, line.replace("### ", ""))
+            pdf.set_font("Arial", size=10)
         else:
-            pdf.set_font("Helvetica", "", 10)
-            pdf.set_text_color(50, 50, 50)
-            pdf.set_x(pdf.l_margin)
-
-            if "**" in line:
-                pdf.draw_bold_markdown_line(line, usable_w, default_font_size=10)
-            else:
-                # Check if centered contact info line (under main title)
-                if i < 3 and "@" in line:
-                    pdf.set_font("Helvetica", "", 9.5)
-                    pdf.set_text_color(100, 100, 100)
-                    pdf.cell(usable_w, 5, line, ln=True, align="C")
-                    pdf.ln(2)
-                else:
-                    pdf.multi_cell(usable_w, 5, line)
-                    pdf.ln(1)
-
-        i += 1
+            pdf.multi_cell(usable_w, 5, line)
 
     # Safe version-agnostic PDF byte export
     raw_output = pdf.output()
+
     if isinstance(raw_output, (bytes, bytearray)):
         pdf_bytes = bytes(raw_output)
     elif isinstance(raw_output, str):
@@ -313,6 +239,7 @@ with st.sidebar:
         "Target Location", value="Hyderabad, Telangana"
     )
 
+    # Search Results input with real-time sidebar validation
     results_wanted_input = st.text_input(
         "Max Job Results to Fetch",
         value="5",
@@ -322,7 +249,7 @@ with st.sidebar:
         ),
     )
 
-    num_results = 5
+    num_results = 5  # Safe default fallback
     if results_wanted_input.strip():
         if not results_wanted_input.strip().isdigit():
             st.sidebar.warning(
@@ -350,6 +277,7 @@ with st.sidebar:
     st.header("📄 Candidate Profile Source")
     uploaded_resume = st.file_uploader("Upload Master Resume (PDF)", type=["pdf"])
 
+# Store active session profiles and results
 if "dynamic_profile" not in st.session_state:
     st.session_state.dynamic_profile = None
 
@@ -563,6 +491,7 @@ if "high_fit_matches" in st.session_state:
                     )
                     st.markdown(f"[🔗 Apply to Position]({target_url})")
 
+                # Dynamic unique key for Streamlit UI state management
                 btn_key = f"btn_gen_{i}_{hash(title)}"
                 res_key = f"ats_res_{i}_{hash(title)}"
 
