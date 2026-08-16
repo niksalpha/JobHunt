@@ -168,6 +168,29 @@ with st.sidebar:
     st.header("📋 Search Parameters")
     target_roles = st.text_input("Target Roles (Comma separated)", value="")
     target_location = st.text_input("Target Location", value="Hyderabad, Telangana")
+
+    # Editable text input for results_wanted, defaulting to 5
+    results_wanted_input = st.text_input(
+        "Max Job Results to Fetch",
+        value="5",
+        help="Specify how many job postings to fetch per platform (1-50). Lower numbers help stay within Gemini free-tier rate limits."
+    )
+
+    # Input Validation Check
+    num_results = 5  # Default fallback
+    if results_wanted_input.strip():
+        if not results_wanted_input.strip().isdigit():
+            st.sidebar.warning("⚠️ Please enter a positive integer for Max Job Results (e.g., 5).")
+        else:
+            parsed_val = int(results_wanted_input.strip())
+            if parsed_val <= 0:
+                st.sidebar.warning("⚠️ Value must be greater than 0.")
+            elif parsed_val > 50:
+                st.sidebar.warning("⚠️ High value detected! High result counts may trigger API rate limits.")
+                num_results = parsed_val
+            else:
+                num_results = parsed_val
+
     is_remote = st.checkbox("Strictly Remote Positions Only", value=False)
     min_score = st.slider("Minimum Acceptable Match Score", min_value=1, max_value=10, value=7)
 
@@ -209,6 +232,15 @@ if st.button("🚀 Deploy Job Hunt - Hit me!!"):
         st.error("Please upload a PDF resume to initialize target mapping.")
         st.stop()
 
+    # Safely convert results_wanted input to an integer with fallback to 5
+    try:
+        num_results = int(results_wanted_input.strip())
+        if num_results <= 0:
+            num_results = 5
+    except ValueError:
+        num_results = 5
+        st.warning("Invalid number entered for Max Job Results. Defaulting to 5.")
+
     # Phase 1: Dynamic Profile Creation from Uploaded PDF
     with st.status("🧠 Lemme analyze and parse incoming resume, hang on!...") as status:
         raw_resume_text = extract_text_from_pdf(uploaded_resume)
@@ -241,7 +273,7 @@ if st.button("🚀 Deploy Job Hunt - Hit me!!"):
                 site_name=platforms,
                 search_term=primary_query,
                 location=target_location,
-                results_wanted=10,
+                results_wanted=num_results,
                 hours_old=72,
                 is_remote=is_remote,
                 linkedin_fetch_description=True,
@@ -360,7 +392,7 @@ if "high_fit_matches" in st.session_state:
                                 except Exception as e:
                                     if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota" in str(e):
                                         st.error(
-                                            "🚨 Gemini API Rate Limit / Quota reached! Please wait for sometime and click the button again or use a different Key if available.")
+                                            "🚨 Gemini API Rate Limit / Quota reached! Please wait for sometime and click the button again or use a different Key if available")
                                     else:
                                         st.error(f"⚠️ API Error: {e}")
 
